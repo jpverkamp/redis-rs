@@ -2,7 +2,8 @@ use std::{fmt::Display, str::FromStr};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum RedisType {
-    Null,
+    NullString,
+    NullArray,
     String { value: String },
     Error { value: String },
     Integer { value: i64 },
@@ -15,7 +16,7 @@ impl From<Option<String>> for RedisType {
             Some(value) => RedisType::String {
                 value: value.to_owned(),
             },
-            None => RedisType::Null,
+            None => RedisType::NullString,
         }
     }
 }
@@ -91,15 +92,22 @@ impl FromStr for RedisType {
                 '*' => {
                     // TODO: Validate that array length parsed correctly
                     let len = String::from(payload).parse::<i64>().unwrap(); 
-                    let mut value = Vec::new();
 
-                    for _ in 0..len {
-                        let (next, el) = parse(rest)?;
-                        value.push(el);
-                        rest = next;
+                    // Special case: bulk string with -1 length is actually a 'null' array
+                    // This is historical
+                    if len < 0 {
+                        Ok((rest, RedisType::NullArray))
+                    } else {
+                        let mut value = Vec::new();
+
+                        for _ in 0..len {
+                            let (next, el) = parse(rest)?;
+                            value.push(el);
+                            rest = next;
+                        }
+
+                        Ok((rest, RedisType::Array { value }))
                     }
-
-                    Ok((rest, RedisType::Array { value }))
                 }
                 '$' => {
                     let len = String::from(payload).parse::<i64>().unwrap(); // TODO: Validate
@@ -107,7 +115,7 @@ impl FromStr for RedisType {
                     // Special case: bulk string with -1 length is actually a 'null' value
                     // I'm just treating any negative as this case
                     if len < 0 {
-                        Ok((rest, RedisType::Null))
+                        Ok((rest, RedisType::NullString))
                     } else {
                         let len = len as usize;
                         let value = String::from(&rest[0..len]);
@@ -133,7 +141,8 @@ impl Display for RedisType {
         let crlf = "\r\n";
 
         match self {
-            RedisType::Null => write!(f, "$-1{}", crlf),
+            RedisType::NullString => write!(f, "$-1{}", crlf),
+            RedisType::NullArray => write!(f, "*-1{}", crlf),
             RedisType::String { value } => {
                 if value.len() == 0 {
                     // Empty strings
@@ -197,7 +206,8 @@ mod tests {
         };
     }
 
-    make_tests!(null, "$-1\r\n", RedisType::Null);
+    make_tests!(null, "$-1\r\n", RedisType::NullString);
+    make_tests!(null_array, "*-1\r\n", RedisType::NullArray);
 
     make_tests!(
         simple_string,
@@ -267,7 +277,7 @@ mod tests {
                 RedisType::String {
                     value: "Yo\0".to_owned()
                 },
-                RedisType::Null,
+                RedisType::NullString,
                 RedisType::Error {
                     value: "ERR Goodbye world".to_owned()
                 },
