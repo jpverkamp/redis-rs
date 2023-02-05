@@ -16,14 +16,14 @@ async fn main() -> std::io::Result<()> {
     let addr = "0.0.0.0:6379";
 
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!("[server] Listening on {addr}");
+    tracing::info!("Listening on {addr}");
     
     loop {
         let (stream, addr) = listener.accept().await?;
-        tracing::debug!("[server] accepted connection from {addr:?}");
+        tracing::debug!("Accepted connection from {addr:?}");
         tokio::spawn(async move {
             if let Err(e) = handle(stream, addr).await {
-                tracing::warn!("an error occurred: {e:?}");
+                tracing::warn!("An error occurred: {e:?}");
             }
         });
     }

@@ -1,5 +1,8 @@
 use std::{fmt::Display, str::FromStr};
 
+// Force output as bulk string rather than simple string
+pub static mut ALWAYS_USE_BULK_STRING: bool = true;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum RedisType {
     NullString,
@@ -88,10 +91,10 @@ impl FromStr for RedisType {
                     RedisType::Integer {
                         value: String::from(payload).parse::<i64>().unwrap(),
                     },
-                )), 
+                )),
                 '*' => {
                     // TODO: Validate that array length parsed correctly
-                    let len = String::from(payload).parse::<i64>().unwrap(); 
+                    let len = String::from(payload).parse::<i64>().unwrap();
 
                     // Special case: bulk string with -1 length is actually a 'null' array
                     // This is historical
@@ -147,9 +150,10 @@ impl Display for RedisType {
                 if value.len() == 0 {
                     // Empty strings
                     write!(f, "$0{}{}", crlf, crlf)
-                } else if value
-                    .chars()
-                    .any(|c| c.is_control() || c == '\r' || c == '\n')
+                } else if unsafe { ALWAYS_USE_BULK_STRING }
+                    || (value
+                        .chars()
+                        .any(|c| c.is_control() || c == '\r' || c == '\n'))
                 {
                     // Bulk strings
                     // TODO: Are there any other interesting cases?
