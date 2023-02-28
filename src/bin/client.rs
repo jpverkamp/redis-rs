@@ -1,11 +1,10 @@
-
-use std::io::{self, BufRead, stdout, Write};
+use std::io::{self, stdout, BufRead, Write};
 use std::str::FromStr;
 
 use redis_rs::RedisType;
 
-use tokio::net::{TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use tracing_subscriber;
 
@@ -26,7 +25,7 @@ async fn main() -> std::io::Result<()> {
     unsafe {
         redis_rs::ALWAYS_USE_BULK_STRING = true;
     }
-    
+
     loop {
         print!("redis-rs> ");
         stdout().flush()?;
@@ -38,7 +37,9 @@ async fn main() -> std::io::Result<()> {
                 // Parse the input into a collection of bulk strings
                 let mut values = Vec::new();
                 for arg in line.split_ascii_whitespace().into_iter() {
-                    values.push(RedisType::String { value: String::from(arg) });
+                    values.push(RedisType::String {
+                        value: String::from(arg),
+                    });
                 }
 
                 // Bundle into an array
@@ -62,16 +63,16 @@ async fn main() -> std::io::Result<()> {
                     Err(err) => {
                         tracing::warn!("Error parsing response from server: {err:?}");
                         continue;
-                    },
+                    }
                 };
-                
+
                 // Print out the response from the server
-                // TODO: Do something else with this? 
+                // TODO: Do something else with this?
                 println!("{data:?}");
-            },
+            }
             Some(Err(e)) => {
                 tracing::warn!("Error reading from stdin: {e:?}");
-            },
+            }
             None => {
                 tracing::info!("Reached end of stdin");
                 break;
@@ -81,4 +82,3 @@ async fn main() -> std::io::Result<()> {
 
     Ok(())
 }
-

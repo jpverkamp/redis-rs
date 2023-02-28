@@ -1,13 +1,12 @@
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
 use redis_rs::RedisType;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use lazy_static::lazy_static;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 use tracing_subscriber;
 
@@ -19,7 +18,7 @@ async fn main() -> std::io::Result<()> {
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on {addr}");
-    
+
     loop {
         let (stream, addr) = listener.accept().await?;
         tracing::debug!("Accepted connection from {addr:?}");
@@ -50,11 +49,11 @@ async fn handle(mut stream: TcpStream, addr: SocketAddr) -> std::io::Result<()> 
             Ok(data) => {
                 tracing::warn!("[{addr}] Error, input should be array, got: {data:?}");
                 continue;
-            },
+            }
             Err(err) => {
                 tracing::warn!("[{addr}] Error parsing input: {err:?}");
                 continue;
-            },
+            }
         };
 
         if command.len() < 1 {
@@ -66,7 +65,10 @@ async fn handle(mut stream: TcpStream, addr: SocketAddr) -> std::io::Result<()> 
         let command = match &command[0] {
             RedisType::String { value } => value.to_ascii_uppercase().to_owned(),
             _ => {
-                tracing::warn!("[{addr}] Input command must be a string, got {:?}", command[0]);
+                tracing::warn!(
+                    "[{addr}] Input command must be a string, got {:?}",
+                    command[0]
+                );
                 continue;
             }
         };
@@ -76,17 +78,24 @@ async fn handle(mut stream: TcpStream, addr: SocketAddr) -> std::io::Result<()> 
             Some(command) => {
                 let response = match command.f.as_ref()(&mut state, args) {
                     Ok(value) => value,
-                    Err(value) => RedisType::Error { value }
+                    Err(value) => RedisType::Error { value },
                 };
                 stream.write_all(response.to_string().as_bytes()).await?;
-            },
+            }
             None => {
                 tracing::warn!("[{addr}] Unimplemented command: {command} {args:?}");
+                stream
+                    .write_all(
+                        RedisType::Error {
+                            value: format!("Unimplemented command: {command}").to_owned(),
+                        }
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .await?;
                 continue;
             }
         }
-
-        // stream.write_all(data.to_string().as_bytes()).await?;
     }
 
     tracing::info!("[{addr}] Ending connection");
@@ -107,10 +116,11 @@ pub struct Command {
 lazy_static! {
     static ref COMMANDS: HashMap<&'static str, Command> = {
         let mut m = HashMap::new();
-        
+
         m.insert("COMMAND", Command {
             f: Box::new(|_state, _args| {
                 // TODO: Assume for now it's run as COMMAND DOCS with no more parameters
+                // Eventually we'll want to serialize and send `COMMANDS` back
                 Ok(RedisType::Array { value: vec![] })
             })
         });
@@ -157,7 +167,7 @@ lazy_static! {
                 })
             })
         });
-        
+
         m
     };
 }
