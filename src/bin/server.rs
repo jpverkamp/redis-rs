@@ -107,7 +107,8 @@ async fn handle(
 
         match COMMANDS.get(command.as_str()) {
             Some(command) => {
-                let response = match command.f.as_ref()(&mut state, args) {
+                let mut command_state = state.lock().await;
+                let response = match command.f.as_ref()(&mut command_state, args) {
                     Ok(value) => value,
                     Err(value) => RedisType::Error { value },
                 };
