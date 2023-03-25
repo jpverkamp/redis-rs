@@ -263,10 +263,378 @@ lazy_static! {
         }
 
         m.insert("COMMAND", Command {
-            f: Box::new(|_state, _args| {
-                // TODO: Assume for now it's run as COMMAND DOCS with no more parameters
-                // Eventually we'll want to serialize and send `COMMANDS` back
+            help: String::from("Return an array with details about every Redis command"),
+            f: Box::new(|_state, args| {
+                assert_n_args!(args, 1);
+                if !is_string_eq!(args, 0, "DOCS") {
+                    return Err(String::from("Only DOCS is supported"));
+                }
+
+                // TODO: Eventually we'll want to serialize and send `COMMANDS` back
                 Ok(RedisType::Array { value: vec![] })
+            })
+        });
+
+        m.insert("APPEND", Command {
+            help: String::from("\
+APPEND key value
+
+Append value to the string stored at key. If key is not set, SET it now. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 2};
+                let key = get_string_arg!(args, 0);
+                let value = get_string_arg!(args, 1);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    current.push_str(&value);
+                } else {
+                    state.keystore.insert(key.clone(), value);
+                }
+
+                Ok(RedisType::Integer{ value: state.keystore.get(&key).unwrap().to_string().len() as i64 })
+            })
+        });
+
+        m.insert("DECR", Command {
+            help: String::from("\
+DECR key
+
+Decrement the number stored at key by one.
+
+If the key does not exist, it is set to 0 before performing the operation. An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer. This operation is limited to 64 bit signed integers. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 1};
+                let key = get_string_arg!(args, 0);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    match current.parse::<i64>() {
+                        Ok(value) => {
+                            *current = (value - 1).to_string();
+                            Ok(RedisType::Integer{ value: value - 1 })
+                        },
+                        Err(_) => Err(String::from("Value is not an integer or out of range")),
+                    }
+                } else {
+                    state.keystore.insert(key.clone(), "-1".to_owned());
+                    Ok(RedisType::Integer{ value: -1 })
+                }
+            })
+        });
+
+        m.insert("DECRBY", Command {
+            help: String::from("\
+DECRBY key decrement
+
+Decrement the number stored at key by decrement.
+
+If the key does not exist, it is set to 0 before performing the operation. An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer. This operation is limited to 64 bit signed integers. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 2};
+                let key = get_string_arg!(args, 0);
+                let decrement = get_integer_arg!(args, 1);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    match current.parse::<i64>() {
+                        Ok(value) => {
+                            *current = (value - decrement).to_string();
+                            Ok(RedisType::Integer{ value: value - decrement })
+                        },
+                        Err(_) => Err(String::from("Value is not an integer or out of range")),
+                    }
+                } else {
+                    state.keystore.insert(key.clone(), (0 - decrement).to_string());
+                    Ok(RedisType::Integer{ value: 0 - decrement })
+                }
+            })
+        });
+
+        m.insert("GET", Command {
+            help: String::from(""),
+            f: Box::new(|state, args| {
+                assert_n_args!(args, 1);
+                let key = get_string_arg!(args, 0);
+
+                Ok(match state.keystore.get(&key) {
+                    Some(value) => RedisType::String { value: value.to_owned() },
+                    None => RedisType::NullString,
+                })
+            })
+        });
+
+        m.insert("GETDEL", Command {
+            help: String::from("\
+GETDEL key
+
+Get the value of key and delete it. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!(args, 1);
+                let key = get_string_arg!(args, 0);
+
+                Ok(match state.keystore.remove(&key) {
+                    Some(value) => RedisType::String { value: value.to_owned() },
+                    None => RedisType::NullString,
+                })
+            })
+        });
+
+        m.insert("GETEX", Command {
+            help: String::from("\
+GETEX key [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds | PERSIST]
+
+Get the value of key and set its expiration time. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_or_more_args!(args, 1);
+                let key = get_string_arg!(args, 0);
+
+                let mut persist = false;
+                let mut expiration = None;
+
+                if args.len() > 1 {
+                    if is_string_eq!(args, 1, "PERSIST") {
+                        persist = true;
+                    } else if let Some(ex) = get_expiration!(args, 1) {
+                        expiration = Some(ex);
+                    } else {
+                        return Err(String::from("Invalid argument"));
+                    }
+                }
+
+                if persist && expiration.is_some() {
+                    return Err(String::from("Cannot set multiple of PERSIST, EX, PX, EXAT, PXAT"));
+                }
+
+                if expiration.is_some() {
+                    tracing::debug!("Setting expiration for key {} to {:?}", key, expiration);
+                    state.ttl.push(key.clone(), expiration.unwrap());
+                } else if persist {
+                    state.ttl.remove(&key);
+                }
+
+                Ok(match state.keystore.remove(&key) {
+                    Some(value) => RedisType::String { value: value.to_owned() },
+                    None => RedisType::NullString,
+                })
+            })
+        });
+
+        m.insert("GETRANGE", Command {
+            help: String::from("\
+GETRANGE key start end
+
+Get a substring of the string stored at a key."
+            ),
+            f: Box::new(|state, args| {
+                assert_n_args!(args, 3);
+                let key = get_string_arg!(args, 0);
+                let mut start = get_integer_arg!(args, 1);
+                let mut end = get_integer_arg!(args, 2);
+
+                Ok(match state.keystore.get(&key) {
+                    Some(value) => {
+                        start = start.max(0).min(value.len() as i64 - 1);
+                        end = end.max(0).min(value.len() as i64 - 1);
+
+                        if start > end {
+                            RedisType::String { value: String::new() }
+                        } else {
+                            RedisType::String { value: value[start as usize..end as usize].to_owned() }
+                        }
+                    },
+                    None => RedisType::NullString,
+                })
+            })
+        });
+
+        m.insert("GETSET", Command {
+            help: String::from("\
+GETSET key value
+
+Set key to hold the string value and return its old value. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!(args, 2);
+                let key = get_string_arg!(args, 0);
+                let value = get_string_arg!(args, 1);
+
+                Ok(match state.keystore.insert(key.clone(), value.clone()) {
+                    Some(old_value) => RedisType::String { value: old_value },
+                    None => RedisType::NullString,
+                })
+            })
+        });
+
+        m.insert("INCR", Command {
+            help: String::from("\
+INCR key
+
+Increment the number stored at key by one.
+
+If the key does not exist, it is set to 0 before performing the operation. An error is returned if the key contains a value of the wrong type or contains a string that can not be represented as integer. This operation is limited to 64 bit signed integers. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 1};
+                let key = get_string_arg!(args, 0);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    match current.parse::<i64>() {
+                        Ok(value) => {
+                            *current = (value + 1).to_string();
+                            Ok(RedisType::Integer{ value: value + 1 })
+                        },
+                        Err(_) => Err(String::from("Value is not an integer or out of range")),
+                    }
+                } else {
+                    state.keystore.insert(key.clone(), "1".to_owned());
+                    Ok(RedisType::Integer{ value: 1 })
+                }
+            })
+        });
+
+        m.insert("INCRBY", Command {
+            help: String::from("\
+INCRBY key increment
+
+Increment the number stored at key by increment.
+"),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 2};
+                let key = get_string_arg!(args, 0);
+                let increment = get_integer_arg!(args, 1);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    match current.parse::<i64>() {
+                        Ok(value) => {
+                            *current = (value + increment).to_string();
+                            Ok(RedisType::Integer{ value: value + increment })
+                        },
+                        Err(_) => Err(String::from("Value is not an integer or out of range")),
+                    }
+                } else {
+                    state.keystore.insert(key.clone(), increment.to_string());
+                    Ok(RedisType::Integer{ value: increment })
+                }
+            })
+        });
+
+        m.insert("INCRBYFLOAT", Command {
+            help: String::from("\
+INCRBYFLOAT key increment
+
+Increment the string representing a floating point number stored at key by the specified increment. 
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 2};
+                let key = get_string_arg!(args, 0);
+                let increment = get_float_arg!(args, 1);
+
+                if let Some(current) = state.keystore.get_mut(&key) {
+                    match current.parse::<f64>() {
+                        Ok(value) => {
+                            *current = (value + increment).to_string();
+                            Ok(RedisType::String{ value: (value + increment).to_string() })
+                        },
+                        Err(_) => Err(String::from("Value is not a float")),
+                    }
+                } else {
+                    state.keystore.insert(key.clone(), increment.to_string());
+                    Ok(RedisType::String{ value: increment.to_string() })
+                }
+            })
+        });
+
+        m.insert("MGET", Command {
+            help: String::from("\
+MGET key [key ...]
+
+Get the values of all the given keys.
+
+For every key that does not hold a string value or does not exist, the special value nil is returned.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_or_more_args!(args, 1);
+
+                let mut values = Vec::new();
+
+                for i in 0..args.len() {
+                    let key = get_string_arg!(args, i);
+                    match state.keystore.get(&key) {
+                        Some(value) => values.push(RedisType::String { value: value.to_owned() }),
+                        None => values.push(RedisType::NullString),
+                    }
+                }
+
+                Ok(RedisType::Array { value: values })
+            })
+        });
+
+        m.insert("MSET", Command {
+            help: String::from("\
+MSET key value [key value ...]
+
+Set multiple keys to multiple values.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_or_more_args!(args, 2);
+
+                for i in (0..args.len()).step_by(2) {
+                    let key = get_string_arg!(args, i);
+                    let value = get_string_arg!(args, i + 1);
+                    state.keystore.insert(key, value);
+                }
+
+                Ok(RedisType::String { value: "OK".to_owned() })
+            })
+        });
+        
+        m.insert("MSETNX", Command {
+            help: String::from("\
+MSETNX key value [key value ...]
+
+Set multiple keys to multiple values, only if none of the keys exist.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_or_more_args!(args, 2);
+
+                for i in (0..args.len()).step_by(2) {
+                    let key = get_string_arg!(args, i);
+                    if state.keystore.contains_key(&key) {
+                        return Ok(RedisType::Integer { value: 0 });
+                    }
+                }
+
+                for i in (0..args.len()).step_by(2) {
+                    let key = get_string_arg!(args, i);
+                    let value = get_string_arg!(args, i + 1);
+                    state.keystore.insert(key, value);
+                }
+
+                Ok(RedisType::Integer { value: 1 })
+            })
+        });
+
+        m.insert("PSETEX", Command {
+            help: String::from("\
+PSETEX key milliseconds value
+
+Set the value and expiration in milliseconds of a key.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 3};
+                let key = get_string_arg!(args, 0);
+                let milliseconds = get_integer_arg!(args, 1);
+                let value = get_string_arg!(args, 2);
+
+                let expiration = SystemTime::now() + Duration::from_millis(milliseconds as u64);
+
+                state.ttl.push(key.clone(), expiration);
+                state.keystore.insert(key, value);
+                
+                Ok(RedisType::String { value: "OK".to_owned() })
             })
         });
 
@@ -358,27 +726,92 @@ Returns OK if SET succeeded, nil if SET was not performed for NX|XX or because o
             })
         });
 
+        m.insert("SETEX", Command {
+            help: String::from("\
+SETEX key seconds value
 
+Set the value and expiration of a key.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 3};
+                let key = get_string_arg!(args, 0);
+                let seconds = get_integer_arg!(args, 1);
+                let value = get_string_arg!(args, 2);
+
+                let expiration = SystemTime::now() + Duration::from_secs(seconds as u64);
+
+                state.ttl.push(key.clone(), expiration);
                 state.keystore.insert(key, value);
+                
                 Ok(RedisType::String { value: "OK".to_owned() })
+            })
+        }); 
+
+        m.insert("SETNX", Command {
+            help: String::from("\
+SETNX key value
+
+Set the value of a key, only if the key does not exist.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 2};
+                let key = get_string_arg!(args, 0);
+                let value = get_string_arg!(args, 1);
+
+                if state.keystore.contains_key(&key) {
+                    Ok(RedisType::Integer { value: 0 })
+                } else {
+                    state.keystore.insert(key, value);
+                    Ok(RedisType::Integer { value: 1 })
+                }
             })
         });
 
-        m.insert("GET", Command {
-            f: Box::new(|state, args| {
-                if args.len() != 1 {
-                    return Err("Expected: GET $key".to_string());
-                }
+        m.insert("SETRANGE", Command {
+            help: String::from("\
+SETRANGE key offset value
 
-                let key = match &args[0] {
-                    RedisType::String { value } => value.to_owned(),
-                    _ => return Err("Expected: GET $key:String".to_string())
+Overwrite part of a string at key starting at the specified offset.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 3};
+                let key = get_string_arg!(args, 0);
+                let offset = get_integer_arg!(args, 1);
+                let value = get_string_arg!(args, 2);
+
+                let mut current_value = match state.keystore.get(&key) {
+                    Some(value) => value.to_owned(),
+                    None => String::new(),
                 };
 
-                Ok(match state.keystore.get(&key) {
-                    Some(value) => RedisType::String { value: value.to_owned() },
-                    None => RedisType::NullString,
-                })
+                if offset > current_value.len() as i64 {
+                    current_value.push_str(&" ".repeat((offset - current_value.len() as i64) as usize));
+                }
+
+                current_value.replace_range(offset as usize.., &value);
+
+                state.keystore.insert(key, current_value.clone());
+
+                Ok(RedisType::Integer { value: current_value.len() as i64 })
+            })
+        });
+
+        m.insert("STRLEN", Command {
+            help: String::from("\
+STRLEN key
+
+Get the length of the value stored in a key.
+            "),
+            f: Box::new(|state, args| {
+                assert_n_args!{args, 1};
+                let key = get_string_arg!(args, 0);
+
+                let value = match state.keystore.get(&key) {
+                    Some(value) => value,
+                    None => return Ok(RedisType::Integer { value: 0 }),
+                };
+
+                Ok(RedisType::Integer { value: value.len() as i64 })
             })
         });
 
