@@ -1,13 +1,14 @@
+use lazy_static::lazy_static;
+use priority_queue::PriorityQueue;
+use redis_rs::RedisType;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-
-use redis_rs::RedisType;
-
-use lazy_static::lazy_static;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-
+use tokio::sync::Mutex;
 use tracing_subscriber;
 
 #[tokio::main]
@@ -19,22 +20,29 @@ async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on {addr}");
 
+    let state = Arc::new(Mutex::new(State::default()));
+
     loop {
         let (stream, addr) = listener.accept().await?;
+        let thread_state = state.clone();
+
         tracing::debug!("Accepted connection from {addr:?}");
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, addr).await {
+            if let Err(e) = handle(stream, addr, thread_state).await {
                 tracing::warn!("An error occurred: {e:?}");
             }
         });
     }
 }
 
-async fn handle(mut stream: TcpStream, addr: SocketAddr) -> std::io::Result<()> {
+async fn handle(
+    mut stream: TcpStream,
+    addr: SocketAddr,
+    state: Arc<Mutex<State>>,
+) -> std::io::Result<()> {
     tracing::info!("[{addr}] Accepted connection");
 
     let mut buf = [0; 1024];
-    let mut state = State::default();
 
     loop {
         let bytes_read = stream.read(&mut buf).await?;
@@ -106,16 +114,130 @@ async fn handle(mut stream: TcpStream, addr: SocketAddr) -> std::io::Result<()> 
 #[derive(Debug, Default)]
 pub struct State {
     keystore: HashMap<String, String>,
+    ttl: PriorityQueue<String, SystemTime>,
 }
 
 #[derive()]
 pub struct Command {
+    help: String,
     f: Box<fn(&mut State, &[RedisType]) -> Result<RedisType, String>>,
 }
 
 lazy_static! {
     static ref COMMANDS: HashMap<&'static str, Command> = {
         let mut m = HashMap::new();
+
+        macro_rules! assert_n_args {
+            ($args:ident, $n:literal) => {
+                if $args.len() != $n {
+                    return Err(String::from(format!("Expected {} args, got {}", $n, $args.len())));
+                }
+            }
+        }
+
+        macro_rules! assert_n_or_more_args {
+            ($args:ident, $n:literal) => {
+                if $args.len() < $n {
+                    return Err(String::from(format!("Expected at least {} args, got {}", $n, $args.len())));
+                }
+            }
+        }
+
+        macro_rules! get_string_arg {
+            ($args:ident, $index:expr) => {
+                {
+                    if $index >= $args.len() {
+                        return Err(String::from("Not enough args"));
+                    }
+
+                    match $args[$index].clone() {
+                        RedisType::String{value} => value,
+                        RedisType::Integer{value} => value.to_string(),
+                        _ => return Err(String::from(format!("Attempted to use {} as a string", $args[$index]))),
+
+                    }
+                }
+            }
+        }
+
+        // TODO: should this be case insensitive?
+        macro_rules! is_string_eq {
+            ($args:ident, $index:expr, $value:literal) => {
+               get_string_arg!($args, $index).to_ascii_uppercase() == $value.to_ascii_uppercase()
+            }
+        }
+
+        macro_rules! get_integer_arg {
+            ($args:ident, $index:expr) => {
+                {
+                    if $index >= $args.len() {
+                        return Err(String::from("Not enough args"));
+                    }
+
+                    match $args[$index].clone() {
+                        RedisType::String{value} => {
+                            match value.parse() {
+                                Ok(value) => value,
+                                Err(_) => return Err(String::from(format!("Attempted to use {} as an integer", $args[$index]))),
+                            }
+                        },
+                        RedisType::Integer{value} => value,
+                        _ => return Err(String::from(format!("Attempted to use {} as an integer", $args[$index]))),
+                    }
+                }
+            }
+        }
+
+        macro_rules! get_float_arg {
+            ($args:ident, $index:expr) => {
+                {
+                    if $index >= $args.len() {
+                        return Err(String::from("Not enough args"));
+                    }
+
+                    match $args[$index].clone() {
+                        RedisType::String{value} => {
+                            match value.parse() {
+                                Ok(value) => value,
+                                Err(_) => return Err(String::from(format!("Attempted to use {} as a float", $args[$index]))),
+                            }
+                        },
+                        RedisType::Integer{value} => value as f64,
+                        _ => return Err(String::from(format!("Attempted to use {} as a float", $args[$index]))),
+                    }
+                }
+            }
+        }
+
+        macro_rules! get_expiration {
+            ($args:ident, $index:expr) => {
+                if is_string_eq!($args, $index, "EX") {
+                    // Seconds from now
+                    let value = get_integer_arg!($args, $index + 1);
+                    Some((
+                        SystemTime::now()
+                        + Duration::from_secs(value as u64)
+                    ))
+                } else if is_string_eq!($args, $index, "PX") {
+                    // Milliseconds from now
+                    let value = get_integer_arg!($args, $index + 1);
+                    Some((
+                        SystemTime::now()
+                        + Duration::from_millis(value as u64)
+                    ))
+                } else if is_string_eq!($args, $index, "EXAT") {
+                    // Seconds since epoch
+                    let value = get_integer_arg!($args, $index + 1);
+                    Some(UNIX_EPOCH + Duration::from_secs(value as u64))
+                } else if is_string_eq!($args, $index, "PXAT") {
+                    // Milliseconds since epoch
+                    let value = get_integer_arg!($args, $index + 1);
+                    Some(UNIX_EPOCH + Duration::from_millis(value as u64))
+                } else {
+                    None
+                }
+            }
+        }
 
         m.insert("COMMAND", Command {
             f: Box::new(|_state, _args| {
@@ -126,24 +248,93 @@ lazy_static! {
         });
 
         m.insert("SET", Command {
+            help: String::from("\
+SET key value [NX | XX] [GET] [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds | KEEPTTL]
+
+Sets key to a given value.
+
+NX|XX - only set if the key does not / does already exist.
+EX|PX|EXAT|PXAT - key expires after seconds/milliseconds or at a Unix timestamp in seconds/milliseconds
+KEEPTTL - retain the previously set TTL
+GET - return the previous value, returns NIL and doesn't return if the key wasn't set
+
+Returns OK if SET succeeded, nil if SET was not performed for NX|XX or because of GET, the old value if GET was specified. 
+            "),
             f: Box::new(|state, args| {
-                if args.len() < 2 {
-                    return Err("Expected: SET key value [NX | XX] [GET] [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds | KEEPTTL]".to_string());
+                assert_n_or_more_args!(args, 2);
+                let key = get_string_arg!(args, 0);
+                let value = get_string_arg!(args, 1);
+
+                let mut nx = false;
+                let mut xx = false;
+                let mut keepttl = false;
+                let mut get = false;
+
+                let mut expiration = None;
+
+                let mut i = 2;
+                loop {
+                    if i >= args.len() {
+                        break;
+                    } else if is_string_eq!(args, i, "NX") {
+                        nx = true;
+                        i += 1;
+                    } else if is_string_eq!(args, i, "XX") {
+                        xx = true;
+                        i += 1;
+                    } else if is_string_eq!(args, i, "KEEPTTL") {
+                        keepttl = true;
+                        i += 1;
+                    } else if is_string_eq!(args, i, "GET") {
+                        get = true;
+                        i += 1;
+                    } else if let Some(ex) = get_expiration!(args, i) {
+                        expiration = Some(ex);
+                        i+= 2;
+                    } else {
+                        return Err(String::from(format!("Unexpected parameter: {:?}", args[i])));
+                    }
                 }
 
-                if args.len() > 2 {
-                    return Err("Expected: SET key value; additional parameters are not yet supported".to_string());
+                if nx && xx {
+                    return Err(String::from("SET: Cannot set both NX and XX"));
                 }
 
-                let key = match &args[0] {
-                    RedisType::String { value } => value.to_owned(),
-                    _ => return Err("SET: Unknown key format".to_string())
+                if keepttl && expiration.is_some() {
+                    return Err(String::from("SET: Cannot set more than one of EX/PX/EXAT/PXAT/KEEPTTL"));
+                }
+
+                if expiration.is_some() {
+                    tracing::debug!("Setting expiration for key {} to {:?}", key, expiration);
+                    state.ttl.push(key.clone(), expiration.unwrap());
+                } else if keepttl {
+                    // do nothing
+                } else {
+                    state.ttl.remove(&key);
+                }
+
+                if nx && state.keystore.contains_key(&key) {
+                    return Ok(RedisType::NullString);
+                }
+
+                if xx && !state.keystore.contains_key(&key) {
+                    return Ok(RedisType::NullString);
+                }
+
+                let result = if get {
+                    Ok(match state.keystore.get(&key) {
+                        Some(value) => RedisType::String { value: value.to_owned() },
+                        None => RedisType::NullString,
+                    })
+                } else {
+                    Ok(RedisType::String { value: "OK".to_owned() })
                 };
 
-                let value = match &args[1] {
-                    RedisType::String { value } => value.to_owned(),
-                    _ => return Err("SET: Unknown value format".to_string())
-                };
+                state.keystore.insert(key, value);
+                result
+            })
+        });
+
 
                 state.keystore.insert(key, value);
                 Ok(RedisType::String { value: "OK".to_owned() })
