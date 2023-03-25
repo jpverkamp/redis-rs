@@ -143,6 +143,7 @@ pub struct State {
 
 #[derive()]
 pub struct Command {
+    #[allow(dead_code)]
     help: String,
     f: Box<fn(&mut State, &[RedisType]) -> Result<RedisType, String>>,
 }
