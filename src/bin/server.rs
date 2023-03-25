@@ -22,6 +22,29 @@ async fn main() -> std::io::Result<()> {
 
     let state = Arc::new(Mutex::new(State::default()));
 
+    let ttl_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let now = SystemTime::now();
+            loop {
+                let evict = match ttl_state.lock().await.ttl.peek() {
+                    Some((_, eviction_time)) => *eviction_time < now,
+                    None => false,
+                };
+
+                if evict {
+                    let mut ttl_state = ttl_state.lock().await;
+                    let (key, _) = ttl_state.ttl.pop().unwrap();
+                    tracing::debug!("Evicting {key} from keystore");
+                    ttl_state.keystore.remove(&key);
+                } else {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
     loop {
         let (stream, addr) = listener.accept().await?;
         let thread_state = state.clone();
