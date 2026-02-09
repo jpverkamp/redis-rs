@@ -1,7 +1,8 @@
 use std::{fmt::Display, str::FromStr};
 
 // Force output as bulk string rather than simple string
-pub static mut ALWAYS_USE_BULK_STRING: bool = true;
+// Default to false so simple strings are used when appropriate
+pub static mut ALWAYS_USE_BULK_STRING: bool = false;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum RedisType {
